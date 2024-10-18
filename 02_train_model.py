@@ -41,7 +41,7 @@ loss_weights = {
 # Set up data
 base_data, morphers = prep_data(
     data_files=input_files,
-    group_by=["game_pk", "at_bat_number"],
+    group_by_cols=["game_pk"],
     rename=config["rename"],
     fixed_cols=fixed_inputs,
     cols=inputs,

@@ -44,7 +44,7 @@ def pad_tensor_dict(tensor_dict, max_length, return_mask: bool = True):
 
 def prep_data(
     data_files: str,
-    group_by: list,
+    group_by_cols: list,
     rename: dict | None = None,
     fixed_cols: dict | None = None,
     cols: dict | None = None,
@@ -87,9 +87,7 @@ def prep_data(
         )
     )
 
-    start_sequence_tokens = input_data.unique(
-        ["game_pk", "at_bat_number"]
-    ).with_columns(
+    start_sequence_tokens = input_data.unique(group_by_cols).with_columns(
         pitch_number=pl.lit(-1).cast(pl.Int64),
         **{
             column: (
@@ -129,7 +127,7 @@ def prep_data(
             ],
         )
         .sort(["at_bat_number", "pitch_number"])
-        .group_by(group_by + list(extra_labels.values()), maintain_order=True)
+        .group_by(group_by_cols + list(extra_labels.values()), maintain_order=True)
         .agg(
             *[pl.col(feature) for feature in morphers.keys()],
             n_pitches=pl.col("pitch_number").count(),

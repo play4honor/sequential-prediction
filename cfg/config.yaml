@@ -5,7 +5,6 @@ rename:
 
 keys:
   - game_pk
-  - at_bat_number
 
 # These are fixed for the whole sequence; we want them in the start of sequence position.
 fixed_features:
@@ -16,18 +15,20 @@ fixed_features:
 features:
   - [description, categorical, {}]
   - [pitch_name, categorical, {}]
-  - [release_speed, numeric, {n_quantiles: 64}]
-  - [plate_x, numeric, {n_quantiles: 64}]
-  - [plate_z, numeric, {n_quantiles: 64}]
+  # - [release_speed, numeric, {n_quantiles: 64}]
+  # - [plate_x, numeric, {n_quantiles: 64}]
+  # - [plate_z, numeric, {n_quantiles: 64}]
   - [events, categorical, {}]
-  - [end_of_at_bat, categorical, {}]
+  # - [end_of_at_bat, categorical, {}]
+  - [end_of_inning, categorical, {}]
+  - [end_of_game, categorical, {}]
 
 # Optionally resume from a checkpoint
 checkpoint_path: null
 epoch_offset: null
 
 # job
-max_length: 20
+max_length: 512
 n_workers: 10
 # Multiply by accumulate_batches to get actual rate.
 log_every_n: 20
@@ -36,7 +37,7 @@ log_every_n: 20
 precision: bf16-mixed
 hidden_size: 384
 tr_args:
-  n_layers: 4
+  n_layers: 2
   layer_args:
     d_model: 384
     ff_dim: 1152
@@ -45,10 +46,10 @@ tr_args:
     n_q_heads: 8
     n_kv_heads: 8
     cope_args:
-      n_positions: 8
+      n_positions: 10
 
 # Learning dynamics
-max_epochs: 20
+max_epochs: 8
 lr: 0.0002
-batch_size: 3072
+batch_size: 32
 accumulate_batches: 1

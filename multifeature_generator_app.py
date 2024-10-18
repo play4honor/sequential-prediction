@@ -13,7 +13,7 @@ from seqpred.data import prep_data, BaseDataset
 from seqpred.nn import SequentialMargeNet
 from seqpred.diag import rollout
 
-checkpoint_path = "./model/epoch=19-validation_loss=10.255.ckpt"
+checkpoint_path = "./model/epoch=7-validation_loss=4.359.ckpt"
 data_files = ["./data/2023_data.parquet"]
 
 st.set_page_config(page_title="Generation Tester", layout="wide")
@@ -101,9 +101,9 @@ def load_model_and_data(config_path, checkpoint_path, data_path):
     morpher_dict = model.hparams["morphers"]
 
     # Set up data
-    data, morphers = prep_data(
+    data, _ = prep_data(
         data_files=data_path,
-        group_by=["game_pk", "at_bat_number"],
+        group_by_cols=["game_pk"],
         rename=config["rename"],
         fixed_cols=fixed_inputs,
         cols=inputs,
@@ -126,7 +126,7 @@ config, model, morpher_dict, ds = load_model_and_data(
 )
 
 with st.sidebar:
-    pitch_index = st.number_input("Plate Appearance Index", 0, len(ds) - 1)
+    pitch_index = st.number_input("Game Index", 0, len(ds) - 1)
     example = ds[pitch_index]
     after_n_pitches = 1
     temperature = st.slider("Generation Temperature", 0.0, 2.0, value=1.0, step=0.01)
@@ -146,7 +146,7 @@ with torch.inference_mode():
     }
     n_generated = None
     attention_per_step = []
-    for i in range(30):
+    for i in range(511):
         generated_pitch = model.generate_one(
             x, keep_attention=True, temperature=temperature
         )
@@ -161,14 +161,13 @@ with torch.inference_mode():
             torch.nn.functional.softmax(layer.gq_attn.attention_activation, dim=-1)
             for layer in model.transformer.transformer_layers
         ]
-        print(attention[0].shape)
         attention_per_step.append(rollout(attention, head_fusion="mean"))
         if (
-            generated_pitch["end_of_at_bat"].item()
-            == morpher_dict["end_of_at_bat"].vocab[True]
+            generated_pitch["end_of_game"].item()
+            == morpher_dict["end_of_game"].vocab[True]
         ):
             n_generated = i + 1
-            print(f"Reached end of at-bat: generated {i+1} pitches")
+            print(f"Reached end of game: generated {i+1} pitches")
             break
 
     context = {k: v[:, :after_n_pitches] for k, v in x.items()}
@@ -194,9 +193,10 @@ generated_df = pl.DataFrame(
         morpher_dict,
     )
 )
-pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0).drop("source")
+# pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0).drop("source")
+pitch_df = generated_df.with_row_index(offset=0)
 
-col1, col2 = st.columns([0.7, 0.3])
+col1, col2 = st.columns([0.99, 0.01])
 
 with col1:
 
@@ -205,8 +205,8 @@ with col1:
 
     fig, ax = plt.subplots(1)
     fig.set_figwidth(12)
-    fig.set_figheight(2)
-    sns.heatmap(attention_at_each_step.cpu().numpy(), ax=ax, annot=True, linewidth=0.2)
+    fig.set_figheight(12)
+    sns.heatmap(attention_at_each_step.cpu().numpy(), ax=ax, linewidth=0.0)
     st.markdown("#### Attention")
     st.pyplot(fig)
 
