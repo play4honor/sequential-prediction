@@ -129,7 +129,7 @@ with st.sidebar:
     pitch_index = st.number_input("Plate Appearance Index", 0, len(ds) - 1)
     example = ds[pitch_index]
     after_n_pitches = 1
-    temperature = st.slider("Generation Temperature", 0.0, 10.0, value=1.0, step=0.1)
+    temperature = st.slider("Generation Temperature", 0.0, 2.0, value=1.0, step=0.01)
     if st.button("Re-run"):
         st.rerun()
 

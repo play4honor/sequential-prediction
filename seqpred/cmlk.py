@@ -180,7 +180,7 @@ class GroupedQueryAttention(nn.Module):
         # n x h x s x e
         return torch.matmul(attn_logits, v)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, keep_attention: bool = False):
         """Mask is additive ONLY."""
 
         # x is (n x s x e)
@@ -194,6 +194,9 @@ class GroupedQueryAttention(nn.Module):
 
         # Apply relative position biases if needed
         attn_logits = self.position_bias(attn_logits)
+
+        if keep_attention:
+            self.attention_activation = attn_logits.detach()
 
         if mask is not None:
             attn_logits = attn_logits + mask

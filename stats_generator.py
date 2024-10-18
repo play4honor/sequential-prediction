@@ -2,40 +2,22 @@ from math import ceil
 
 import yaml
 import torch
-import seaborn as sns
-import seaborn.objects as so
-from matplotlib import pyplot as plt
 import polars as pl
 from morphers import Integerizer, Quantiler
 import streamlit as st
 
 from seqpred.data import prep_data, BaseDataset
 from seqpred.nn import SequentialMargeNet
-from seqpred.diag import rollout
 
-checkpoint_path = "./model/epoch=19-validation_loss=10.255.ckpt"
+checkpoint_path = "./model/epoch=14-validation_loss=10.321.ckpt"
 data_files = ["./data/2023_data.parquet"]
 
 st.set_page_config(page_title="Synthetic Statistics", layout="wide")
 
 
-def unmorph(pitches: dict, morphers):
-    unmorphed_pitches = {}
-    for pk, pv in pitches.items():
-        if isinstance(morphers[pk], Integerizer):
-            reverse_vocab = {v: k for k, v in morphers[pk].vocab.items()}
-            vector = pv.tolist()
-            # If there's only one feature
-            if not isinstance(vector, list):
-                vector = [vector]
-            unmorphed_pitches[pk] = [reverse_vocab.get(item, "-") for item in vector]
-        else:
-            vector = pv.tolist()
-            if not isinstance(vector, list):
-                vector = [vector]
-            qs = morphers[pk].quantiles
-            unmorphed_pitches[pk] = [qs[ceil(item * len(qs))] for item in vector]
-    return unmorphed_pitches
+def unmorph_numeric(x, morpher):
+    qs = morpher.quantiles
+    return (x * len(qs)).ceil().replace({i: v for i, v in enumerate(qs)})
 
 
 @st.cache_resource
@@ -85,10 +67,13 @@ config, model, morpher_dict, data = load_model_and_data(
     data_files,
 )
 
+# Get pitcher and batter lists
 pitchers = sorted(data["pitcher_reference"].unique().to_list())
 batters = sorted(data["batter_reference"].unique().to_list())
 
 with st.sidebar:
+
+    prog_bar = st.progress(0, "Done")
 
     player_type = st.selectbox("Player Type", ["Pitchers", "Batters"])
 
@@ -99,7 +84,8 @@ with st.sidebar:
         player = st.selectbox("Batter", batters)
         filter_column = "batter_reference"
 
-    temperature = st.slider("Generation Temperature", 0.0, 10.0, value=1.0, step=0.1)
+    temperature = st.slider("Generation Temperature", 0.0, 2.0, value=1.0, step=0.01)
+    n_samples = st.slider("Number of Samples", 1, 10, 3, 1)
     if st.button("Re-run"):
         st.rerun()
 
@@ -112,68 +98,68 @@ ds = BaseDataset(
     model.hparams["max_length"],
 )
 
-dl = torch.utils.data.DataLoader(ds, batch_size=2048)
+all_df = []
+for i in range(n_samples):
+    prog_bar.progress(int(i * (100 / n_samples)), text="Generating")
 
-with torch.inference_mode():
+    dl = torch.utils.data.DataLoader(ds, batch_size=2048)
 
-    # dl will always have one batch.
-    batch = next(iter(dl))
-    x = {
-        k: v[:, 0].to(model.device).unsqueeze(1)
-        for k, v in batch.items()
-        if isinstance(v, torch.Tensor) and k not in ["game_pk", "at_bat_number"]
-    }
-    for i in range(19):
-        generated_pitch = model.generate_one(
-            x, keep_attention=False, temperature=temperature
-        )
+    with torch.inference_mode():
+
+        # dl will always have one batch.
+        batch = next(iter(dl))
         x = {
-            k: torch.cat([v, generated_pitch[k].unsqueeze(-1)], dim=1)
-            for k, v in x.items()
-            if k != "pad_mask"
+            k: v[:, 0].to(model.device).unsqueeze(1)
+            for k, v in batch.items()
+            if isinstance(v, torch.Tensor) and k not in ["game_pk", "at_bat_number"]
         }
-    # Remove the start of sequence positions.
-    x = {k: v[:, 1:] for k, v in x.items()}
+        for i in range(19):
+            generated_pitch = model.generate_one(
+                x, keep_attention=False, temperature=temperature
+            )
+            x = {
+                k: torch.cat([v, generated_pitch[k].unsqueeze(-1)], dim=1)
+                for k, v in x.items()
+                if k != "pad_mask"
+            }
+        # Remove the start of sequence positions.
+        x = {k: v[:, 1:] for k, v in x.items()}
 
-    x |= {
-        "game_pk": batch["game_pk"],
-        "at_bat_number": batch["at_bat_number"],
-        "end_position": x["end_of_at_bat"].argmax(dim=1),
-    }
+        x |= {
+            "game_pk": batch["game_pk"],
+            "at_bat_number": batch["at_bat_number"],
+            "end_position": x["end_of_at_bat"].argmax(dim=1),
+        }
 
-generated_df = pl.DataFrame({k: v.detach().cpu().numpy() for k, v in x.items()})
-truncated_df = generated_df.with_columns(
-    *[
-        pl.col(k).list.slice(0, pl.col("end_position") + 1)
-        for k, v in generated_df.schema.items()
-        if v == pl.List
-    ]
-)
+    generated_df = pl.DataFrame({k: v.detach().cpu().numpy() for k, v in x.items()})
+    truncated_df = generated_df.with_columns(
+        *[
+            pl.col(k).list.slice(0, pl.col("end_position") + 1)
+            for k, v in generated_df.schema.items()
+            if v == pl.List
+        ]
+    )
 
-exploded_df = truncated_df.explode(
-    col
-    for col in truncated_df.columns
-    if col not in ["game_pk", "at_bat_number", "end_position"]
-)
+    exploded_df = truncated_df.explode(
+        col
+        for col in truncated_df.columns
+        if col not in ["game_pk", "at_bat_number", "end_position"]
+    )
+    all_df.append(exploded_df)
 
-desc_dict = {v: k for k, v in morpher_dict["description"].vocab.items()}
-intermediate_df = exploded_df.with_columns(pl.col("description").replace(desc_dict))
+prog_bar.progress(100, text="Finished!")
 
 # Some unmorph stuff
 pn_dict = {v: k for k, v in morpher_dict["pitch_name"].vocab.items()}
 desc_dict = {v: k for k, v in morpher_dict["description"].vocab.items()}
 events_dict = {v: k for k, v in morpher_dict["events"].vocab.items()}
 
-
-def unmorph_numeric(x, morpher):
-    qs = morpher.quantiles
-    return (x * len(qs)).ceil().replace({i: v for i, v in enumerate(qs)})
-
+complete_df = pl.concat(all_df)
 
 if player_type == "Pitchers":
 
     summary_df = (
-        exploded_df.with_columns(
+        complete_df.with_columns(
             pitch_name=pl.col("pitch_name").replace(pn_dict, default=None),
             description=pl.col("description").replace(desc_dict, default=None),
             plate_x=unmorph_numeric(pl.col("plate_x"), morpher_dict["plate_x"]),
@@ -215,7 +201,10 @@ if player_type == "Pitchers":
         .with_columns(
             zone_pct=pl.col("n_zone") / pl.col("count"),
             percent=pl.col("count") / pl.col("count").sum(),
+            count=(pl.col("count") / n_samples).round(),
+            n_zone=pl.col("n_zone") / n_samples,
         )
+        .drop("n_zone")
         .sort("percent", descending=True)
     )
     st.dataframe(summary_df)
@@ -223,7 +212,7 @@ if player_type == "Pitchers":
 else:
 
     summary_df = (
-        exploded_df.with_columns(
+        complete_df.with_columns(
             pitch_name=pl.col("pitch_name").replace(pn_dict, default=None),
             description=pl.col("description").replace(desc_dict, default=None),
             plate_x=unmorph_numeric(pl.col("plate_x"), morpher_dict["plate_x"]),
@@ -250,7 +239,7 @@ else:
         "Walk%",
         f"{round((rd.get('walk', 0) + rd.get('hit_by_pitch', 0)) * 100 / total_events, 1)}%",
     )
-    st.metric("HR", rd.get("home_run", 0))
+    st.metric("HR", round(rd.get("home_run", 0) / n_samples))
     ba = sum(rd.get(k, 0) for k in ["single", "double", "triple", "home_run"]) / sum(
         rd.get(k, 0)
         for k in [
