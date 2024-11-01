@@ -35,21 +35,21 @@ log_every_n: 20
 
 # Network spec
 precision: bf16-mixed
-hidden_size: 384
+hidden_size: 512
 tr_args:
   n_layers: 2
   layer_args:
-    d_model: 384
-    ff_dim: 1152
+    d_model: 512
+    ff_dim: 1536
   position_encoding: cope
   attn_args:
-    n_q_heads: 8
+    n_q_heads: 16
     n_kv_heads: 8
     cope_args:
-      n_positions: 10
+      n_positions: 16
 
 # Learning dynamics
-max_epochs: 8
+max_epochs: 64
 lr: 0.0002
 batch_size: 32
 accumulate_batches: 1

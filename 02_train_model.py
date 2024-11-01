@@ -8,8 +8,6 @@ from morphers import Integerizer
 from seqpred.data import prep_data, BaseDataset
 from seqpred.nn import SequentialMargeNet
 
-torch.set_float32_matmul_precision("medium")
-
 with open("cfg/config.yaml", "r") as f:
     config = yaml.load(f, Loader=yaml.CLoader)
 
@@ -65,11 +63,13 @@ train_dl = torch.utils.data.DataLoader(
     batch_size=config["batch_size"],
     shuffle=True,
     num_workers=config["n_workers"],
+    drop_last=True,
 )
 valid_dl = torch.utils.data.DataLoader(
     valid_ds,
     batch_size=config["batch_size"],
     num_workers=config["n_workers"],
+    drop_last=True,
 )
 
 file_prefix = (
@@ -84,14 +84,15 @@ trainer = pl.Trainer(
     precision=config["precision"],
     logger=pl.loggers.TensorBoardLogger("."),
     accumulate_grad_batches=config["accumulate_batches"],
+    num_sanity_val_steps=0,
     callbacks=[
         ModelCheckpoint(
             dirpath="./model",
             save_top_k=1,
             monitor="validation_loss",
-            filename=file_prefix + "{epoch}-{validation_loss:.3f}",
+            enable_version_counter=True,
+            filename="{version}-{epoch}-{validation_loss:.4f}",
         ),
-        # MemoryMonitorCallback("./some_memory_stuff_idk_3.pickle"),
     ],
 )
 
@@ -106,10 +107,10 @@ with trainer.init_module():
             optim_lr=config["lr"],
             tr_args=config["tr_args"],
         )
-        file_prefix = ""
+        net.compile()
     else:
         net = SequentialMargeNet.load_from_checkpoint(config["checkpoint_path"])
-        file_prefix = f"resumed_after_{config['epoch_offset']}-"
+        net.compile()
 
-
+torch.set_float32_matmul_precision("medium")
 trainer.fit(net, train_dataloaders=train_dl, val_dataloaders=valid_dl)

@@ -13,7 +13,7 @@ from seqpred.data import prep_data, BaseDataset
 from seqpred.nn import SequentialMargeNet
 from seqpred.diag import rollout
 
-checkpoint_path = "./model/epoch=7-validation_loss=4.359.ckpt"
+checkpoint_path = "./model/version=0-epoch=11-validation_loss=3.6964.ckpt"
 data_files = ["./data/2023_data.parquet"]
 
 st.set_page_config(page_title="Generation Tester", layout="wide")
@@ -128,7 +128,7 @@ config, model, morpher_dict, ds = load_model_and_data(
 with st.sidebar:
     pitch_index = st.number_input("Game Index", 0, len(ds) - 1)
     example = ds[pitch_index]
-    after_n_pitches = 1
+    after_n_pitches = st.slider("Context_length", 0, 200, value=50, step=1) + 1
     temperature = st.slider("Generation Temperature", 0.0, 2.0, value=1.0, step=0.01)
     if st.button("Re-run"):
         st.rerun()
@@ -146,7 +146,7 @@ with torch.inference_mode():
     }
     n_generated = None
     attention_per_step = []
-    for i in range(511):
+    for i in range(512 - after_n_pitches):
         generated_pitch = model.generate_one(
             x, keep_attention=True, temperature=temperature
         )
@@ -155,7 +155,6 @@ with torch.inference_mode():
             for k, v in x.items()
             if k != "pad_mask"
         }
-        print(x)
         # Get attention activations.
         attention = [
             torch.nn.functional.softmax(layer.gq_attn.attention_activation, dim=-1)
@@ -170,22 +169,26 @@ with torch.inference_mode():
             print(f"Reached end of game: generated {i+1} pitches")
             break
 
+    n_generated = 512 if n_generated is None else n_generated
+
     context = {k: v[:, :after_n_pitches] for k, v in x.items()}
     generated = {k: v[:, after_n_pitches:] for k, v in x.items()}
     # yuck
-    attention_at_each_step = torch.zeros([n_generated, n_generated]).to(
-        attention_per_step[0]
-    )
-    for i in range(n_generated):
-        attention_at_each_step[i, : i + 1] = attention_per_step[i]
+    attention_at_each_step = torch.zeros(
+        [n_generated, n_generated + after_n_pitches]
+    ).to(attention_per_step[0])
+
+    for i in range(n_generated - 1):
+        attention_at_each_step[i, : i + after_n_pitches] = attention_per_step[i]
 
 context_df = pl.DataFrame(
     {"source": "context"}
     | unmorph(
-        {k: v.squeeze().cpu().numpy() for k, v in context.items()},
+        # [1:] removes the start token.
+        {k: v[:, 1:].squeeze().cpu().numpy() for k, v in context.items()},
         morpher_dict,
     )
-).with_columns(end_of_at_bat=pl.lit(False))
+)
 generated_df = pl.DataFrame(
     {"source": "generated"}
     | unmorph(
@@ -193,64 +196,33 @@ generated_df = pl.DataFrame(
         morpher_dict,
     )
 )
-# pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0).drop("source")
-pitch_df = generated_df.with_row_index(offset=0)
+if context_df.height > 0:
+    pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0)
+else:
+    pitch_df = generated_df.with_row_index(offset=0)
+
+pitch_df = pitch_df.with_columns(
+    empirical_inning=0.5 + 0.5 * pl.col("end_of_inning").cum_sum()
+)
 
 col1, col2 = st.columns([0.99, 0.01])
 
 with col1:
 
     st.markdown("#### Pitches")
-    st.dataframe(pitch_df, hide_index=True)
+    st.dataframe(pitch_df, hide_index=True, width=1_000_000)
 
     fig, ax = plt.subplots(1)
     fig.set_figwidth(12)
     fig.set_figheight(12)
-    sns.heatmap(attention_at_each_step.cpu().numpy(), ax=ax, linewidth=0.0)
+    sns.heatmap(
+        attention_at_each_step.cpu().numpy(),
+        ax=ax,
+        linewidth=0.0,
+        cmap=sns.cubehelix_palette(as_cmap=True),
+    )
     st.markdown("#### Attention")
     st.pyplot(fig)
-
-with col2:
-
-    fig, ax = plt.subplots(1)
-    fig.set_figwidth(6.8)
-    fig.set_figheight(10)
-    (
-        so.Plot()
-        .add(
-            so.Dot(pointsize=25),
-            data=pitch_df[1:, :],
-            x="plate_x",
-            y="plate_z",
-            color="description",
-            marker="pitch_name",
-            legend=False,
-        )
-        .add(
-            so.Paths(),
-            x=[-0.71, 0.71, 0.71, -0.71, -0.71],
-            y=[3.5, 3.5, 1.5, 1.5, 3.5],
-            legend=False,
-        )
-        .add(
-            so.Text({"fontweight": "bold"}, color="white"),
-            data=pitch_df[1:, :],
-            x="plate_x",
-            y="plate_z",
-            text="index",
-        )
-        .scale(
-            color=colors,
-            marker=markers,
-        )
-        .limit(x=(-1.7, 1.7), y=(-0.5, 4.5))
-        .on(ax)
-        .show()
-    )
-    st.markdown("#### Pitch Locations")
-    st.pyplot(fig)
-
-    st.metric("Result", pitch_df["events"][-1])
 
 with st.sidebar:
     if n_generated is not None:
