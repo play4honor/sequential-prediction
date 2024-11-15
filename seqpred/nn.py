@@ -194,6 +194,8 @@ class SequentialMargeNet(pl.LightningModule):
     def training_step(self, x):
         preds = self(x)
         loss_mask = (~torch.isinf(x["pad_mask"])).float()
+        # TKTK use a prefix length config
+        loss_mask[:19, :] = 0
         loss_dict = {
             f"train_{col}_loss": (
                 criterion(preds[col], x[col][:, 1:]) * loss_mask[:, 1:]

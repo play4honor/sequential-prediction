@@ -34,10 +34,35 @@ batting_orders = (
     .with_columns(
         batting_order=pl.cum_count("at_bat_number").over(
             partition_by=["game_pk", "batting_team"], order_by="at_bat_number"
-        )
+        ),
+        team=pl.when(pl.col("inning_topbot") == "Bot")
+        .then(pl.lit("home"))
+        .otherwise(pl.lit("away")),
     )
-    .filter(pl.col("batting_order") <= 9, pl.col("game_pk") == 661965)
+    .with_columns(
+        token_type=pl.concat_str(pl.col("team"), pl.col("batting_order"), separator="_")
+    )
+    .filter(pl.col("batting_order") <= 9)
     .sort(["batting_team", "batting_order"])
+    .select(["game_pk", "batter_name", "token_type", "release_speed"])
 )
 
-print(batting_orders)
+starting_pitchers = (
+    all_data.sort(["at_bat_number", "inning_topbot"], descending=False)
+    .unique(["game_pk", "batting_team"], keep="first")
+    .with_columns(
+        token_type=pl.when(pl.col("inning_topbot") == "Bot")
+        .then(pl.lit("home_sp"))
+        .otherwise(pl.lit("away_sp")),
+    )
+    # .filter(pl.col("game_pk") == 661965)
+    .select(["game_pk", "pitcher_name", "token_type"])
+)
+
+roster = (
+    pl.concat([batting_orders, starting_pitchers], how="diagonal")
+    .with_columns(at_bat_number=-1)
+    .with_columns(pl.col("release_speed").fill_null(float("nan")))
+)
+print(roster)
+print(a := roster.row(-1, named=True))

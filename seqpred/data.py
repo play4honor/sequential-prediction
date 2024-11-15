@@ -84,24 +84,54 @@ def prep_data(
             (pl.col("game_pk") != pl.col("game_pk").shift(-1, fill_value=-1)).alias(
                 "end_of_game"
             ),
+            batting_team=pl.when(pl.col("inning_topbot") == "Bot")
+            .then(pl.col("home_team"))
+            .otherwise(pl.col("away_team")),
+            pitching_team=pl.when(pl.col("inning_topbot") == "Top")
+            .then(pl.col("home_team"))
+            .otherwise(pl.col("away_team")),
+            token_type=pl.lit("game_pitch"),
         )
     )
 
-    start_sequence_tokens = input_data.unique(group_by_cols).with_columns(
-        pitch_number=pl.lit(-1).cast(pl.Int64),
-        **{
-            column: (
-                pl.lit(None).cast(input_data[column].dtype)
-                if (
-                    input_data[column].dtype.is_numeric()
-                    or input_data[column].dtype.is_(pl.Boolean)
-                )
-                else pl.lit("start_of_sequence")
-            )
-            for column in cols.keys()
-        },
+    batting_orders = (
+        input_data.sort(["at_bat_number"], descending=False)
+        .unique(["game_pk", "batting_team", "batter_name"], keep="first")
+        .with_columns(
+            batting_order=pl.cum_count("at_bat_number").over(
+                partition_by=["game_pk", "batting_team"], order_by="at_bat_number"
+            ),
+            team=pl.when(pl.col("inning_topbot") == "Bot")
+            .then(pl.lit("home"))
+            .otherwise(pl.lit("away")),
+        )
+        .with_columns(
+            token_type=pl.concat_str(
+                pl.col("team"), pl.col("batting_order"), separator="_"
+            ),
+            at_bat_number=pl.lit(-1),
+        )
+        .filter(pl.col("batting_order") <= 9)
+        .sort(["batting_team", "batting_order"])
+        .select(["game_pk", "batter_name", "token_type"])
     )
-    input_data = pl.concat([input_data, start_sequence_tokens])
+
+    starting_pitchers = (
+        input_data.sort(["at_bat_number", "inning_topbot"], descending=False)
+        .unique(["game_pk", "batting_team"], keep="first")
+        .with_columns(
+            token_type=pl.when(pl.col("inning_topbot") == "Bot")
+            .then(pl.lit("home_sp"))
+            .otherwise(pl.lit("away_sp")),
+            at_bat_number=pl.lit(-1),
+        )
+        # .filter(pl.col("game_pk") == 661965)
+        .select(["game_pk", "pitcher_name", "token_type"])
+    )
+
+    input_data = pl.concat(
+        [batting_orders, starting_pitchers, input_data], how="diagonal"
+    )
 
     all_cols = fixed_cols | cols
 

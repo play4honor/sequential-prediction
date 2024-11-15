@@ -1,4 +1,4 @@
-from math import ceil
+from math import ceil, isnan
 
 import yaml
 import torch
@@ -6,14 +6,14 @@ import seaborn as sns
 import seaborn.objects as so
 from matplotlib import pyplot as plt
 import polars as pl
-from morphers import Integerizer, Quantiler
+from morphers import Integerizer, MissingIndicatorQuantiler
 import streamlit as st
 
 from seqpred.data import prep_data, BaseDataset
 from seqpred.nn import SequentialMargeNet
 from seqpred.diag import rollout
 
-checkpoint_path = "./model/version=0-epoch=11-validation_loss=3.6964.ckpt"
+checkpoint_path = "./model/version=0-epoch=20-validation_loss=6.0145.ckpt"
 data_files = ["./data/2023_data.parquet"]
 
 st.set_page_config(page_title="Generation Tester", layout="wide")
@@ -72,7 +72,9 @@ def unmorph(pitches, morphers):
             if not isinstance(vector, list):
                 vector = [vector]
             qs = morphers[pk].quantiles
-            unmorphed_pitches[pk] = [qs[ceil(item * len(qs))] for item in vector]
+            unmorphed_pitches[pk] = [
+                -1.0 if isnan(item) else qs[ceil(item * len(qs))] for item in vector
+            ]
     return unmorphed_pitches
 
 
@@ -83,7 +85,7 @@ def load_model_and_data(config_path, checkpoint_path, data_path):
         config = yaml.load(f, Loader=yaml.CLoader)
 
     morpher_dispatch = {
-        "numeric": Quantiler,
+        "numeric": MissingIndicatorQuantiler,
         "categorical": Integerizer,
     }
 
@@ -128,7 +130,7 @@ config, model, morpher_dict, ds = load_model_and_data(
 with st.sidebar:
     pitch_index = st.number_input("Game Index", 0, len(ds) - 1)
     example = ds[pitch_index]
-    after_n_pitches = st.slider("Context_length", 0, 200, value=50, step=1) + 1
+    after_n_pitches = st.slider("Context_length", 0, 200, value=20, step=1) + 1
     temperature = st.slider("Generation Temperature", 0.0, 2.0, value=1.0, step=0.01)
     if st.button("Re-run"):
         st.rerun()
@@ -181,14 +183,14 @@ with torch.inference_mode():
     for i in range(n_generated - 1):
         attention_at_each_step[i, : i + after_n_pitches] = attention_per_step[i]
 
-context_df = pl.DataFrame(
-    {"source": "context"}
-    | unmorph(
-        # [1:] removes the start token.
-        {k: v[:, 1:].squeeze().cpu().numpy() for k, v in context.items()},
-        morpher_dict,
-    )
-)
+# context_df = pl.DataFrame(
+#     {"source": "context"}
+#     | unmorph(
+#         # [1:] removes the start token.
+#         {k: v[:, 1:].squeeze().cpu().numpy() for k, v in context.items()},
+#         morpher_dict,
+#     )
+# )
 generated_df = pl.DataFrame(
     {"source": "generated"}
     | unmorph(
@@ -196,10 +198,11 @@ generated_df = pl.DataFrame(
         morpher_dict,
     )
 )
-if context_df.height > 0:
-    pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0)
-else:
-    pitch_df = generated_df.with_row_index(offset=0)
+# if context_df.height > 0:
+#     pitch_df = pl.concat([context_df, generated_df]).with_row_index(offset=0)
+# else:
+#     pitch_df = generated_df.with_row_index(offset=0)
+pitch_df = generated_df.with_row_index(offset=0)
 
 pitch_df = pitch_df.with_columns(
     empirical_inning=0.5 + 0.5 * pl.col("end_of_inning").cum_sum()
@@ -225,6 +228,7 @@ with col1:
     st.pyplot(fig)
 
 with st.sidebar:
+    st.markdown(f"game_pk: {example['game_pk']}")
     if n_generated is not None:
         st.markdown(f"Generated {n_generated} pitches")
     else:
