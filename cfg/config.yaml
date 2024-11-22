@@ -16,13 +16,17 @@ features:
   - [token_type, categorical, {}]
   - [description, categorical, {}]
   - [pitch_name, categorical, {}]
-  - [release_speed, numeric, {n_quantiles: 64}]
+  - [release_speed, quantile, {n_quantiles: 64}]
   # - [plate_x, numeric, {n_quantiles: 64}]
   # - [plate_z, numeric, {n_quantiles: 64}]
   - [events, categorical, {}]
+  - [post_home_score, normalized, {}]
+  - [post_away_score, normalized, {}]
   # - [end_of_at_bat, categorical, {}]
+  - [inning, categorical, {}]
   - [end_of_inning, categorical, {}]
   - [end_of_game, categorical, {}]
+  
 
 # Optionally resume from a checkpoint
 checkpoint_path: null

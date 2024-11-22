@@ -1,68 +1,89 @@
 from io import StringIO
 import re
+import pprint
 
 import statsapi
 import polars as pl
+from tqdm import tqdm
 
-all_data = pl.read_parquet("./data/all_data.parquet").with_columns(
-    batting_team=pl.when(pl.col("inning_topbot") == "Bot")
-    .then(pl.col("home_team"))
-    .otherwise(pl.col("away_team")),
-    pitching_team=pl.when(pl.col("inning_topbot") == "Top")
-    .then(pl.col("home_team"))
-    .otherwise(pl.col("away_team")),
-)
+from pybaseball import team_ids
 
-pp_rosters = all_data.select(
-    team=pl.col("batting_team"),
-    season=pl.col("game_year"),
-    player=pl.col("batter_name"),
-    player_type=pl.lit("position_player"),
-).unique()
-pitcher_rosters = all_data.select(
-    team=pl.col("pitching_team"),
-    season=pl.col("game_year"),
-    player=pl.col("pitcher_name"),
-    player_type=pl.lit("pitcher"),
-).unique()
+team_mappings = {
+    "TOR": 141,
+    "SEA": 136,
+    "TB": 139,
+    "HOU": 117,
+    "ATL": 144,
+    "CHC": 112,
+    "CWS": 145,
+    "AZ": 109,
+    "CLE": 114,
+    "PHI": 143,
+    "KC": 118,
+    "SD": 135,
+    "MIL": 158,
+    "TEX": 140,
+    "LAA": 108,
+    "MIA": 146,
+    "OAK": 133,
+    "SF": 137,
+    "STL": 138,
+    "PIT": 134,
+    "COL": 115,
+    "NYY": 147,
+    "BAL": 110,
+    "LAD": 143,
+    "BOS": 111,
+    "DET": 116,
+    "CIN": 113,
+    "NYM": 121,
+    "MIN": 142,
+    "WSH": 120,
+}
 
-total_rosters = pl.concat([pp_rosters, pitcher_rosters])
-
-batting_orders = (
-    all_data.sort(["at_bat_number"], descending=False)
-    .unique(["game_pk", "batting_team", "batter_name"], keep="first")
-    .with_columns(
-        batting_order=pl.cum_count("at_bat_number").over(
-            partition_by=["game_pk", "batting_team"], order_by="at_bat_number"
-        ),
-        team=pl.when(pl.col("inning_topbot") == "Bot")
-        .then(pl.lit("home"))
-        .otherwise(pl.lit("away")),
+team_dates = (
+    pl.read_parquet("./data/all_data.parquet")
+    .unique(["home_team", "away_team", "game_date"])
+    .unpivot(on=["home_team", "away_team"], index="game_date", value_name="team")
+    .select(
+        pl.col("game_date"),
+        pl.col("game_date").dt.to_string("%m/%d/%Y").alias("date_string"),
+        pl.col("team"),
+        pl.col("team").replace(team_mappings).alias("teamId"),
     )
-    .with_columns(
-        token_type=pl.concat_str(pl.col("team"), pl.col("batting_order"), separator="_")
-    )
-    .filter(pl.col("batting_order") <= 9)
-    .sort(["batting_team", "batting_order"])
-    .select(["game_pk", "batter_name", "token_type", "release_speed"])
+    .sort("game_date")
 )
 
-starting_pitchers = (
-    all_data.sort(["at_bat_number", "inning_topbot"], descending=False)
-    .unique(["game_pk", "batting_team"], keep="first")
-    .with_columns(
-        token_type=pl.when(pl.col("inning_topbot") == "Bot")
-        .then(pl.lit("home_sp"))
-        .otherwise(pl.lit("away_sp")),
-    )
-    # .filter(pl.col("game_pk") == 661965)
-    .select(["game_pk", "pitcher_name", "token_type"])
-)
+rosters = []
 
-roster = (
-    pl.concat([batting_orders, starting_pitchers], how="diagonal")
-    .with_columns(at_bat_number=-1)
-    .with_columns(pl.col("release_speed").fill_null(float("nan")))
-)
-print(roster)
-print(a := roster.row(-1, named=True))
+
+for i, row in tqdm(enumerate(team_dates.iter_rows(named=True))):
+    try:
+        result = statsapi.get(
+            "team_roster",
+            {
+                "teamId": row["teamId"],
+                "rosterType": "active",
+                "date": row["date_string"],
+            },
+        )["roster"]
+    except:
+        continue
+
+    ids = [x["person"]["id"] for x in result]
+    names = [x["person"]["fullName"] for x in result]
+    positions = ["P" if x["position"]["code"] == "1" else "B" for x in result]
+    result_df = pl.DataFrame(
+        {
+            "team": row["team"],
+            "date": row["game_date"],
+            "id": ids,
+            "name": names,
+            "position": positions,
+        }
+    )
+    rosters.append(result_df)
+
+
+rosters = pl.concat(rosters, how="vertical")
+rosters.write_parquet("./data/all_rosters.parquet")

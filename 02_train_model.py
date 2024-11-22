@@ -2,7 +2,7 @@ import yaml
 import torch
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint
-from morphers import MissingIndicatorQuantiler
+from morphers import MissingIndicatorQuantiler, Normalizer
 from morphers import Integerizer
 
 from seqpred.data import prep_data, BaseDataset
@@ -14,7 +14,8 @@ with open("cfg/config.yaml", "r") as f:
 input_files = [config["train_data_path"]]
 
 morpher_dispatch = {
-    "numeric": MissingIndicatorQuantiler,
+    "quantile": MissingIndicatorQuantiler,
+    "normalized": Normalizer,
     "categorical": Integerizer,
 }
 
