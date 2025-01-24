@@ -2,6 +2,8 @@ from itertools import chain
 
 import polars as pl
 import numpy as np
+import torch
+from torch.utils.data import Dataset
 
 
 def make_bucket_limits(x: pl.Series, n_buckets):
@@ -10,7 +12,16 @@ def make_bucket_limits(x: pl.Series, n_buckets):
     breaks = np.nanquantile(x.to_numpy(), q)
     # Make sure every value is distinct.
     breaks += np.linspace(0, 1e-5, n_buckets)
-    return breaks
+    breaks_list = breaks.tolist()
+    labels = (
+        [f"<{breaks[0] :.2f}"]
+        + [
+            f"{left :.2f}-{right :.2f}"
+            for left, right in zip(breaks_list[:-1], breaks_list[1:])
+        ]
+        + [f">{breaks_list[-1] :.2f}"]
+    )
+    return breaks, labels
 
 
 def prep_step_data(
@@ -41,8 +52,8 @@ def prep_step_data(
             **{
                 feature: pl.col(feature)
                 .cut(
-                    quantiles[feature],
-                    labels=np.arange(len(quantiles[feature]) + 1).astype("str"),
+                    quantiles[feature][0],
+                    labels=quantiles[feature][1],
                 )
                 .cast(pl.String)
                 for feature in quantiles
@@ -93,6 +104,63 @@ def prep_step_data(
     return input_data, vocab
 
 
+class StepTokenizer:
+
+    def __init__(self, vocab, extra_tokens: list | None = None):
+
+        self.vocab = {token: i for i, token in enumerate(vocab)}
+        self.extra_tokens = set(
+            ["<PAD>", "<UNK>"] + (extra_tokens if extra_tokens is not None else [])
+        )
+        for token in self.extra_tokens:
+            self.vocab[token] = len(self.vocab)
+
+        self.inverse_vocab = {v: k for k, v in self.vocab.items()}
+
+    def __len__(self):
+        return len(self.vocab)
+
+    @property
+    def pad_idx(self):
+        return self.vocab["<PAD>"]
+
+    def transform(self, x: list):
+        return torch.tensor(
+            [self.vocab.get(token, self.vocab["<UNK>"]) for token in x],
+            dtype=torch.int64,
+        )
+
+    def invert(self, x: list):
+        return [self.inverse_vocab.get(idx, "<UNK>") for idx in x]
+
+
+class StepDataset(Dataset):
+
+    def __init__(self, tokenizer: StepTokenizer, df: pl.DataFrame):
+
+        self.tokenizer = tokenizer
+        self.df = df
+        self.max_length = self.df["features"].list.len().max()
+
+    def __len__(self):
+        return self.df.height
+
+    def __getitem__(self, x):
+        row = self.df.row(x, named=True)
+        vectorized = torch.cat(
+            [
+                self.tokenizer.transform(row["features"]),
+                torch.tensor(
+                    [self.tokenizer.pad_idx] * (self.max_length - len(row["features"])),
+                    dtype=torch.long,
+                ),
+            ],
+            dim=0,
+        )
+
+        return vectorized.type(torch.LongTensor)
+
+
 if __name__ == "__main__":
 
     data, vocab = prep_step_data(
@@ -105,4 +173,8 @@ if __name__ == "__main__":
         n_buckets=32,
     )
 
-    print(vocab)
+    tokenizer = StepTokenizer(vocab["features"].to_list())
+
+    ds = StepDataset(tokenizer, data)
+    print(ds.max_length)
+    print(ds[500])
