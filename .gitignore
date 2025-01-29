@@ -3,3 +3,4 @@ model/
 __pycache__/
 lightning_logs/
 logs/
+step_model/

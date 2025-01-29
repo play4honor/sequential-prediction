@@ -45,6 +45,51 @@ def prep_step_data(
         else precomputed_quantiles
     )
 
+    starting_pitchers = (
+        input_data.sort(["at_bat_number"], descending=False)
+        .with_columns(
+            team=pl.when(pl.col("inning_topbot") == "Bot")
+            .then(pl.lit("<AWAY>"))
+            .otherwise(pl.lit("<HOME>")),
+        )
+        .group_by(["game_pk", "team"], maintain_order=True)
+        .agg(
+            pl.concat_str(
+                pl.lit("pitcher_name: "), pl.col("pitcher_name").first()
+            ).alias("pitcher_name")
+        )
+    )
+
+    batting_orders = (
+        input_data.sort(["at_bat_number"], descending=False)
+        .unique(["game_pk", "inning_topbot", "batter_name"], keep="first")
+        .with_columns(
+            batting_order=pl.cum_count("at_bat_number").over(
+                partition_by=["game_pk", "inning_topbot"], order_by="at_bat_number"
+            ),
+            team=pl.when(pl.col("inning_topbot") == "Bot")
+            .then(pl.lit("<HOME>"))
+            .otherwise(pl.lit("<AWAY>")),
+        )
+        .filter(pl.col("batting_order") <= 9)
+        .sort(["batting_order"])
+        .group_by(["game_pk", "team"], maintain_order=True)
+        .agg(
+            pl.concat_str(pl.lit("batter_name: "), pl.col("batter_name")).alias(
+                "batter_name"
+            )
+        )
+        .join(starting_pitchers, on=["game_pk", "team"])
+        .with_columns(
+            lineup=pl.concat_list(
+                pl.col("team"), pl.col("pitcher_name"), pl.col("batter_name")
+            )
+        )
+        .sort(["team"])
+        .group_by(["game_pk"], maintain_order=True)
+        .agg(pl.col("lineup").flatten())
+    )
+
     input_data = (
         input_data
         # Quantize numeric features
@@ -95,6 +140,12 @@ def prep_step_data(
                 pl.lit("<SOS>"), pl.col("features"), pl.lit("<EOS>")
             ),
             length=pl.col("features").list.len(),
+        )
+        .join(batting_orders, on="game_pk")
+        .select(
+            "game_pk",
+            features=pl.concat_list(pl.col("lineup"), pl.col("features")),
+            length=pl.col("length") + pl.col("lineup").list.len(),
         )
     )
 

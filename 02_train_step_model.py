@@ -21,6 +21,7 @@ base_data, vocab = prep_step_data(
 )
 
 tokenizer = StepTokenizer(vocab["features"].to_list())
+print(f"Vocabulary size: {len(tokenizer)}")
 ds = StepDataset(
     tokenizer=tokenizer,
     df=base_data,

@@ -3,8 +3,8 @@ train_data_path: ./data/all_data.parquet
 ab_cat_feats:
   - inning
   - inning_topbot
-  - pitcher
-  - batter
+  - pitcher_name
+  - batter_name
   
 ab_num_feats: []
 
@@ -20,7 +20,7 @@ n_buckets: 32
 
 n_workers: 0
 # Multiply by accumulate_batches to get actual rate.
-log_every_n: 20
+log_every_n: 5
 
 # Network spec
 precision: bf16-mixed
@@ -31,10 +31,10 @@ model_params:
   n_heads: 4
 
 # Learning dynamics
-max_epochs: 8
-learning_rate: 0.001
+max_epochs: 12
+learning_rate: 0.02
 batch_size: 32
-accumulate_batches: 1
+accumulate_batches: 16
 
 # lol as if
 checkpoint_path: null
