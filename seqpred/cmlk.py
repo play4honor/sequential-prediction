@@ -216,12 +216,12 @@ class GroupedQueryAttention(nn.Module):
 class CopeGroupedQueryAttn(GroupedQueryAttention):
     def __init__(
         self,
-        cope_args: dict,
+        pe_args: dict,
         **kwargs,
     ):
         super().__init__(position_bias=nn.Identity, **kwargs)
         self.cope_layer = CoPE(
-            **cope_args, n_heads=kwargs["n_q_heads"], input_dim=self.head_dim
+            **pe_args, n_heads=kwargs["n_q_heads"], input_dim=self.head_dim
         )
 
     def forward(self, x, mask=None, keep_attention: bool = False):
@@ -251,6 +251,71 @@ class CopeGroupedQueryAttn(GroupedQueryAttention):
 
         # n x s x input_size
         return self.wo(output)
+
+
+class RopeGroupedQueryAttention(GroupedQueryAttention):
+
+    def __init__(
+        self,
+        pe_args: dict,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        freqs = 1.0 / (
+            pe_args["theta"]
+            ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        )
+        emb = torch.outer(torch.arange(pe_args["max_seq_len"]).float(), freqs)
+        cos_cached = emb.cos()[None, None, :, :]
+        sin_cached = emb.sin()[None, None, :, :]
+
+        self.register_buffer("cos_cached", cos_cached)
+        self.register_buffer("sin_cached", sin_cached)
+
+    def forward(self, x, mask=None, keep_attention: bool = False):
+        """Mask is additive ONLY."""
+
+        # x is (n x s x e)
+        batch_size, seq_len, _ = x.shape
+
+        xq, exp_k, exp_v = self._create_qkv(x, batch_size, seq_len)
+
+        cos = self.cos_cached[:, :, :seq_len, :].repeat(1, 1, 1, 2)
+        sin = self.sin_cached[:, :, :seq_len, :].repeat(1, 1, 1, 2)
+        xq, exp_k = self._apply_rope(xq, exp_k, cos, sin)
+
+        # This is Scaled Dot-Product Attention
+        # n x h x s x s
+        attn_logits = self._calculate_qv_logits(xq, exp_k)
+
+        if keep_attention:
+            self.attention_activation = attn_logits.detach().cpu()
+
+        # n x s x (h x e)
+        # n x h x s x e
+        output = torch.nn.functional.scaled_dot_product_attention(
+            xq, exp_k, exp_v, is_causal=True
+        )
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+
+        # n x s x input_size
+        return self.wo(output)
+
+    def _rotate_half(self, x):
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _apply_rope(self, q, k, cos, sin):
+        q = (q * cos) + (self._rotate_half(q) * sin)
+        k = (k * cos) + (self._rotate_half(k) * sin)
+        # https://en.wikipedia.org/wiki/Rotation_matrix
+        # (x, y)
+        # after rotate_half: (-y, x)
+        # (x, y) * cos(theta) = x * cos_theta, y * cos_theta
+        # (-y, x) * sin(theta) = -y * sin_theta, x * sin_theta
+        # x * cos_theta - y * sin_theta, y * cos_theta + x * sin_theta
+        return q, k
 
 
 class TransformerLayer(nn.Module):
@@ -343,9 +408,24 @@ class Transformer(nn.Module):
                     for _ in range(n_layers)
                 ]
             )
+        elif self.position_encoding == "rope":
+            self.position_biases = nn.Identity()
+            self.transformer_layers = nn.ModuleList(
+                [
+                    TransformerLayer(
+                        **layer_args,
+                        attention_module=RopeGroupedQueryAttention(
+                            input_dim=layer_args["d_model"],
+                            **attn_args,
+                            position_bias=self.position_biases,
+                        ),
+                    )
+                    for _ in range(n_layers)
+                ]
+            )
         else:
             raise ValueError(
-                f"position_encoding must be one of ['t5', 'cope', 'nope'], got {self.position_encoding}"
+                f"position_encoding must be one of ['t5', 'cope', 'nope', 'rope'], got {self.position_encoding}"
             )
 
     def forward(self, x, mask=None, keep_attention: bool = False):

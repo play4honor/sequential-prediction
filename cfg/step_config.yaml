@@ -25,13 +25,18 @@ log_every_n: 5
 # Network spec
 precision: bf16-mixed
 model_params:
-  d_model: 256
-  ff_dim: 768
+  d_model: 192
+  ff_dim: 576
   n_layers: 4
   n_heads: 4
+  position_encoding: rope
+  pe_args:
+    theta: 10000.0
+    # You have to set this later.
+    max_seq_len: null
 
 # Learning dynamics
-max_epochs: 12
+max_epochs: 8
 learning_rate: 0.02
 batch_size: 32
 accumulate_batches: 16

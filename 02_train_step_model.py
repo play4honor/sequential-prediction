@@ -27,6 +27,9 @@ ds = StepDataset(
     df=base_data,
 )
 
+# Set the max sequence length
+config["model_params"]["pe_args"]["max_seq_len"] = ds.max_length
+
 train_ds, valid_ds = torch.utils.data.random_split(ds, [0.75, 0.25])
 
 train_dl = torch.utils.data.DataLoader(

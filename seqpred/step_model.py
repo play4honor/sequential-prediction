@@ -18,6 +18,8 @@ class StepModel(pl.LightningModule):
         n_layers: int,
         ff_dim: int,
         n_heads: int,
+        position_encoding: str,
+        pe_args: dict | None = None,
         optim_lr: float = 0.001,
     ):
 
@@ -36,6 +38,7 @@ class StepModel(pl.LightningModule):
         self.attn_args = {
             "n_kv_heads": self.n_heads,
             "n_q_heads": self.n_heads,
+            "pe_args": pe_args,
         }
 
         # Optimizer
@@ -43,13 +46,30 @@ class StepModel(pl.LightningModule):
 
         # Model
         self.embedding = nn.Embedding(self.vocab_size, self.d_model)
-        self.position_encoding = BoringPositionalEncoding(self.max_length, self.d_model)
-        self.transformer = Transformer(
-            self.n_layers,
-            layer_args=self.transformer_layer_args,
-            position_encoding="nope",
-            attn_args=self.attn_args,
-        )
+        if position_encoding == "boring":
+            self.position_encoding = BoringPositionalEncoding(
+                self.max_length, self.d_model
+            )
+            self.transformer = Transformer(
+                self.n_layers,
+                layer_args=self.transformer_layer_args,
+                position_encoding="nope",
+                attn_args=self.attn_args,
+            )
+        elif position_encoding == "rope":
+            self.position_encoding = nn.Identity()
+            self.transformer = Transformer(
+                self.n_layers,
+                layer_args=self.transformer_layer_args,
+                position_encoding="rope",
+                attn_args=self.attn_args,
+            )
+
+        else:
+            raise ValueError(
+                f"position_encoding must be 'boring' or 'rope', got {position_encoding}"
+            )
+
         self.prediction_head = nn.Sequential(
             RMSNorm(self.d_model),
             nn.SiLU(),
