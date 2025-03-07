@@ -11,7 +11,6 @@ with open("cfg/step_config.yaml", "r") as f:
 
 input_files = [config["train_data_path"]]
 
-
 # Set up data
 base_data, vocab = prep_step_data(
     data_files=input_files,

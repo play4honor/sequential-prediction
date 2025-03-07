@@ -7,6 +7,8 @@ from .nn import BoringPositionalEncoding
 from .cmlk import Transformer, RMSNorm
 
 
+# TKTK SAVE VOCAB
+# ALSO SAVE QUANTILES WTF
 class StepModel(pl.LightningModule):
 
     def __init__(
@@ -24,6 +26,7 @@ class StepModel(pl.LightningModule):
     ):
 
         super().__init__()
+        self.save_hyperparameters(logger=False)
         self.vocab_size = vocab_size
         self.pad_index = pad_index
         self.d_model = d_model
@@ -85,11 +88,11 @@ class StepModel(pl.LightningModule):
         self.train_perplexity = Perplexity(ignore_index=self.pad_index)
         self.validation_perplexity = Perplexity(ignore_index=self.pad_index)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, keep_attention: bool = False) -> torch.Tensor:
 
         x = self.embedding(x)
         x = self.position_encoding(x)
-        x = self.transformer(x)
+        x = self.transformer(x, keep_attention=keep_attention)
         x = self.prediction_head(x)
 
         return x

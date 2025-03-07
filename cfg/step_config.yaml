@@ -36,8 +36,8 @@ model_params:
     max_seq_len: null
 
 # Learning dynamics
-max_epochs: 8
-learning_rate: 0.02
+max_epochs: 16
+learning_rate: 0.005
 batch_size: 32
 accumulate_batches: 16
 

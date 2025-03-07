@@ -4,6 +4,7 @@ import polars as pl
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from logzero import logger
 
 
 def make_bucket_limits(x: pl.Series, n_buckets):
@@ -24,135 +25,190 @@ def make_bucket_limits(x: pl.Series, n_buckets):
     return breaks, labels
 
 
-def prep_step_data(
-    data_files: list[str],
-    cat_features: tuple[list[str], list[str]],
-    num_features: tuple[list[str], list[str]],
-    n_buckets: int,
-    precomputed_quantiles: dict[str, list] | None = None,
-):
+class StepPrep:
+    def __init__(
+        self,
+        cat_features: tuple[list[str], list[str]],
+        num_features: tuple[list[str], list[str]],
+        n_buckets: int,
+        precomputed_quantiles: dict[str, list] | None = None,
+    ):
 
-    input_dataframes = [pl.read_parquet(file) for file in data_files]
-    input_data = pl.concat(input_dataframes)
+        self.cat_features = cat_features
+        self.num_features = num_features
+        self.n_buckets = n_buckets
 
-    # Quantile calculation
-    quantiles = (
-        {
-            feature: make_bucket_limits(input_data[feature], n_buckets)
-            for feature in num_features[0] + num_features[1]
-        }
-        if precomputed_quantiles is None
-        else precomputed_quantiles
-    )
+        self.quantiles = (
+            precomputed_quantiles if precomputed_quantiles is not None else {}
+        )
+        self.vocab = []
 
-    starting_pitchers = (
-        input_data.sort(["at_bat_number"], descending=False)
-        .with_columns(
-            team=pl.when(pl.col("inning_topbot") == "Bot")
-            .then(pl.lit("<AWAY>"))
-            .otherwise(pl.lit("<HOME>")),
-        )
-        .group_by(["game_pk", "team"], maintain_order=True)
-        .agg(
-            pl.concat_str(
-                pl.lit("pitcher_name: "), pl.col("pitcher_name").first()
-            ).alias("pitcher_name")
-        )
-    )
+    def __call__(
+        self,
+        data_files: list[str],
+        overwrite: bool = False,
+    ) -> pl.DataFrame:
 
-    batting_orders = (
-        input_data.sort(["at_bat_number"], descending=False)
-        .unique(["game_pk", "inning_topbot", "batter_name"], keep="first")
-        .with_columns(
-            batting_order=pl.cum_count("at_bat_number").over(
-                partition_by=["game_pk", "inning_topbot"], order_by="at_bat_number"
-            ),
-            team=pl.when(pl.col("inning_topbot") == "Bot")
-            .then(pl.lit("<HOME>"))
-            .otherwise(pl.lit("<AWAY>")),
-        )
-        .filter(pl.col("batting_order") <= 9)
-        .sort(["batting_order"])
-        .group_by(["game_pk", "team"], maintain_order=True)
-        .agg(
-            pl.concat_str(pl.lit("batter_name: "), pl.col("batter_name")).alias(
-                "batter_name"
-            )
-        )
-        .join(starting_pitchers, on=["game_pk", "team"])
-        .with_columns(
-            lineup=pl.concat_list(
-                pl.col("team"), pl.col("pitcher_name"), pl.col("batter_name")
-            )
-        )
-        .sort(["team"])
-        .group_by(["game_pk"], maintain_order=True)
-        .agg(pl.col("lineup").flatten())
-    )
+        input_dfs = [pl.read_parquet(file) for file in data_files]
+        input_data = pl.concat(input_dfs)
 
-    input_data = (
-        input_data
-        # Quantize numeric features
-        .with_columns(
-            **{
-                feature: pl.col(feature)
-                .cut(
-                    quantiles[feature][0],
-                    labels=quantiles[feature][1],
-                )
-                .cast(pl.String)
-                for feature in quantiles
-            }
-        )
-        .with_columns(
-            **{
-                feature: pl.concat_str(
-                    pl.lit(f"{feature}: "),
-                    pl.coalesce(pl.col(feature), pl.lit("MISSING")),
-                )
-                for feature in chain.from_iterable(cat_features + num_features)
-            },
-        )
-        .select(
-            "game_pk",
-            "at_bat_number",
-            "pitch_number",
-            pl.concat_list(
-                pl.lit("<AB>"),
-                *[pl.col(feat) for feat in num_features[0] + cat_features[0]],
-            ).alias("ab_feats"),
-            pl.concat_list(
-                pl.lit("<PITCH>"), *(cat_features[1] + num_features[1])
-            ).alias("pitch_feats"),
-        )
-        .sort("pitch_number")
-        .group_by("game_pk", "at_bat_number", maintain_order=True)
-        .agg(
-            ab_feats=pl.col("ab_feats").first(),
-            pitch_feats=pl.col("pitch_feats").flatten(),
-        )
-        .with_columns(features=pl.concat_list("ab_feats", "pitch_feats"))
-        .sort("at_bat_number")
-        .group_by("game_pk", maintain_order=True)
-        .agg(features=pl.col("features").flatten())
-        .with_columns(
-            features=pl.concat_list(
-                pl.lit("<SOS>"), pl.col("features"), pl.lit("<EOS>")
-            ),
-            length=pl.col("features").list.len(),
-        )
-        .join(batting_orders, on="game_pk")
-        .select(
+        self.quantize_features(input_data, overwrite)
+
+        processed_data = self._prep_input_data(input_data)
+        starters = self._prep_starters(input_data)
+
+        concat_data = processed_data.join(starters, on="game_pk").select(
             "game_pk",
             features=pl.concat_list(pl.col("lineup"), pl.col("features")),
             length=pl.col("length") + pl.col("lineup").list.len(),
         )
-    )
 
-    vocab = input_data.select(
-        pl.col("features").list.explode().value_counts(sort=True).struct.unnest()
-    )
-    return input_data, vocab
+        self.gen_vocab(concat_data)
+
+        return concat_data
+
+    def gen_vocab(
+        self,
+        input_data: pl.DataFrame,
+    ):
+        self.vocab = input_data.select(
+            pl.col("features").list.explode().value_counts(sort=True).struct.unnest()
+        )["features"].to_list()
+
+    def _prep_starters(
+        self,
+        input_data: pl.DataFrame,
+    ) -> pl.DataFrame:
+
+        starting_pitchers = (
+            input_data.sort(["at_bat_number"], descending=False)
+            .with_columns(
+                team=pl.when(pl.col("inning_topbot") == "Bot")
+                .then(pl.lit("<AWAY>"))
+                .otherwise(pl.lit("<HOME>")),
+            )
+            .group_by(["game_pk", "team"], maintain_order=True)
+            .agg(
+                pl.concat_str(
+                    pl.lit("pitcher_name: "), pl.col("pitcher_name").first()
+                ).alias("pitcher_name")
+            )
+        )
+
+        batting_orders = (
+            input_data.sort(["at_bat_number"], descending=False)
+            .unique(["game_pk", "inning_topbot", "batter_name"], keep="first")
+            .with_columns(
+                batting_order=pl.cum_count("at_bat_number").over(
+                    partition_by=["game_pk", "inning_topbot"], order_by="at_bat_number"
+                ),
+                team=pl.when(pl.col("inning_topbot") == "Bot")
+                .then(pl.lit("<HOME>"))
+                .otherwise(pl.lit("<AWAY>")),
+            )
+            .filter(pl.col("batting_order") <= 9)
+            .sort(["batting_order"])
+            .group_by(["game_pk", "team"], maintain_order=True)
+            .agg(
+                pl.concat_str(pl.lit("batter_name: "), pl.col("batter_name")).alias(
+                    "batter_name"
+                )
+            )
+        )
+
+        starters = (
+            batting_orders.join(starting_pitchers, on=["game_pk", "team"])
+            .with_columns(
+                lineup=pl.concat_list(
+                    pl.col("team"), pl.col("pitcher_name"), pl.col("batter_name")
+                )
+            )
+            .sort(["team"])
+            .group_by(["game_pk"], maintain_order=True)
+            .agg(pl.col("lineup").flatten())
+        )
+
+        return starters
+
+    def _prep_input_data(
+        self,
+        input_data: pl.DataFrame,
+    ) -> pl.DataFrame:
+        out = (
+            input_data
+            # Quantize numeric features
+            .with_columns(
+                **{
+                    feature: pl.col(feature)
+                    .cut(
+                        self.quantiles[feature][0],
+                        labels=self.quantiles[feature][1],
+                    )
+                    .cast(pl.String)
+                    for feature in self.quantiles
+                }
+            )
+            .with_columns(
+                **{
+                    feature: pl.concat_str(
+                        pl.lit(f"{feature}: "),
+                        pl.coalesce(pl.col(feature), pl.lit("MISSING")),
+                    )
+                    for feature in chain.from_iterable(
+                        self.cat_features + self.num_features
+                    )
+                },
+            )
+            .select(
+                "game_pk",
+                "at_bat_number",
+                "pitch_number",
+                pl.concat_list(
+                    pl.lit("<AB>"),
+                    *[
+                        pl.col(feat)
+                        for feat in self.num_features[0] + self.cat_features[0]
+                    ],
+                ).alias("ab_feats"),
+                pl.concat_list(
+                    pl.lit("<PITCH>"), *(self.cat_features[1] + self.num_features[1])
+                ).alias("pitch_feats"),
+            )
+            .sort("pitch_number")
+            .group_by("game_pk", "at_bat_number", maintain_order=True)
+            .agg(
+                ab_feats=pl.col("ab_feats").first(),
+                pitch_feats=pl.col("pitch_feats").flatten(),
+            )
+            .with_columns(features=pl.concat_list("ab_feats", "pitch_feats"))
+            .sort("at_bat_number")
+            .group_by("game_pk", maintain_order=True)
+            .agg(features=pl.col("features").flatten())
+            .with_columns(
+                features=pl.concat_list(
+                    pl.lit("<SOS>"), pl.col("features"), pl.lit("<EOS>")
+                ),
+                length=pl.col("features").list.len(),
+            )
+        )
+
+        return out
+
+    def quantize_features(
+        self,
+        input_data: pl.DataFrame,
+        overwrite: bool,
+    ):
+        # Quantile calculation
+        for feat in self.num_features[0] + self.num_features[1]:
+            if (feat not in self.quantiles.keys()) or (overwrite):
+                self.quantiles[feat] = make_bucket_limits(
+                    input_data[feat], self.n_buckets
+                )
+            else:
+                logger.warning(
+                    f"{feat} quantiles already calculated, specify overwrite=True to replace"
+                )
 
 
 class StepTokenizer:
